@@ -1,4 +1,5 @@
-﻿#include <iostream>
+﻿// 2-2까지 구현 완료
+#include <iostream>
 #include <list>
 #include <mutex>
 #include <thread>
@@ -16,7 +17,7 @@ public:
     int pid;
     bool isForeground;
     bool promoted;
-    int remainingTime;  
+    int remainingTime;
     Process(int id, bool fg) : pid(id), isForeground(fg), promoted(false), remainingTime(0) {}
 };
 
@@ -47,7 +48,7 @@ public:
             bgQueue.pop_front();
             return p;
         }
-        return Process(-1, false);  
+        return Process(-1, false);
     }
 
     void promote() {
