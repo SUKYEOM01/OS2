@@ -44,28 +44,25 @@ public:
 void DynamicQueue::enqueue(Process p) {
     std::lock_guard<std::mutex> lock(mtx);
     if (p.type == 'F') {
-        if (top->processList.empty()) {
-            top->processList.push_back(p);
-        }
-        else {
-            top->next = std::make_shared<StackNode>();
-            top->next->processList.push_front(p);
-            top->next->next = nullptr;
-        }
+        top->processList.push_front(p);
     }
     else {
         if (top->processList.empty()) {
             top->processList.push_back(p);
         }
         else {
-            auto newNode = std::make_shared<StackNode>();
-            newNode->processList.push_front(p);
-            newNode->next = top;
-            top = newNode;
+            auto current = top;
+            while (current->next != nullptr) {
+                current = current->next;
+            }
+            current->next = std::make_shared<StackNode>();
+            current->next->processList.push_back(p);
+            current->next->next = nullptr;
         }
     }
     cv.notify_all();
 }
+
 
 Process DynamicQueue::dequeue() {
     std::unique_lock<std::mutex> lock(mtx);
@@ -267,7 +264,7 @@ int main() {
     DynamicQueue dq;
     WaitQueue wq;
 
-    // Create and enqueue shell and monitor processes
+    // 프로세스 생성 및 enqueue
     Process shell = { 0, 'F', 0, false };
     Process monitor = { 1, 'B', 0, false };
     dq.enqueue(shell);
