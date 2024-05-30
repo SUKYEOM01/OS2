@@ -1,286 +1,271 @@
-﻿#define _CRT_SECURE_NO_WARNINGS
-#include <iostream>
+﻿#include <iostream>
+#include <list>
+#include <mutex>
 #include <thread>
 #include <condition_variable>
-#include <queue>
-#include <list>
-#include <vector>
-#include <memory>
 #include <chrono>
-#include <cstring>
+#include <vector>
+#include <sstream>
+#include <fstream>
 #include <algorithm>
 
-// Process 구조체
-struct Process {
-    int pid;
-    char type; // 'F' for Foreground, 'B' for Background
-    int wakeUpTime; // 남은 대기 시간
-    bool promoted; // 프로모션 여부
-};
+using namespace std;
 
-// StackNode 구조체
-struct StackNode {
-    std::list<Process> processList;
-    std::shared_ptr<StackNode> next;
-};
-
-// DynamicQueue 클래스
-class DynamicQueue {
-private:
-    std::shared_ptr<StackNode> top;
-    std::mutex mtx;
-    std::condition_variable cv;
-
+class Process {
 public:
-    DynamicQueue() : top(std::make_shared<StackNode>()) {}
-
-    void enqueue(Process p);
-    Process dequeue();
-    void promote();
-    void split_n_merge();
-    void printQueue();
+    int pid;
+    bool isForeground;
+    bool promoted;
+    int remainingTime;  // Time remaining in Wait Queue
+    Process(int id, bool fg) : pid(id), isForeground(fg), promoted(false), remainingTime(0) {}
 };
 
-void DynamicQueue::enqueue(Process p) {
-    std::lock_guard<std::mutex> lock(mtx);
-    if (p.type == 'F') {
-        top->processList.push_front(p);
-    }
-    else {
-        if (top->processList.empty()) {
-            top->processList.push_back(p);
+class DynamicQueue {
+    list<Process> fgQueue;
+    list<Process> bgQueue;
+    mutex mtx;
+public:
+    void enqueue(Process p) {
+        lock_guard<mutex> lock(mtx);
+        if (p.isForeground) {
+            fgQueue.push_back(p);
         }
         else {
-            auto current = top;
-            while (current->next != nullptr) {
-                current = current->next;
-            }
-            current->next = std::make_shared<StackNode>();
-            current->next->processList.push_back(p);
-            current->next->next = nullptr;
+            bgQueue.push_back(p);
         }
     }
-    cv.notify_all();
-}
 
-
-Process DynamicQueue::dequeue() {
-    std::unique_lock<std::mutex> lock(mtx);
-    cv.wait(lock, [this] { return !top->processList.empty(); });
-
-    Process p = top->processList.front();
-    top->processList.pop_front();
-
-    if (top->processList.empty() && top->next) {
-        top = top->next;
-    }
-
-    return p;
-}
-
-void DynamicQueue::promote() {
-    std::lock_guard<std::mutex> lock(mtx);
-
-    if (!top->next) return;
-
-    auto& currentList = top->processList;
-    auto& nextList = top->next->processList;
-
-    nextList.splice(nextList.end(), currentList, currentList.begin());
-
-    if (currentList.empty() && top->next) {
-        top = top->next;
-    }
-}
-
-void DynamicQueue::split_n_merge() {
-    std::lock_guard<std::mutex> lock(mtx);
-
-    const size_t threshold = 5;
-    std::shared_ptr<StackNode> current = top;
-
-    while (current) {
-        if (current->processList.size() > threshold) {
-            auto newNode = std::make_shared<StackNode>();
-            auto it = current->processList.begin();
-            std::advance(it, current->processList.size() / 2);
-            newNode->processList.splice(newNode->processList.begin(), current->processList, current->processList.begin(), it);
-            newNode->next = current->next;
-            current->next = newNode;
+    Process dequeue() {
+        lock_guard<mutex> lock(mtx);
+        if (!fgQueue.empty()) {
+            Process p = fgQueue.front();
+            fgQueue.pop_front();
+            return p;
         }
-        current = current->next;
-    }
-}
-
-void DynamicQueue::printQueue() {
-    std::lock_guard<std::mutex> lock(mtx);
-    std::shared_ptr<StackNode> current = top;
-    std::cout << "DQ: ";
-    bool isFirstNode = true;
-    bool isLastNode = false;
-    while (current) {
-        if (!current->processList.empty()) {
-            std::cout << (isFirstNode ? "P => " : "") << "[";
-            for (const auto& proc : current->processList) {
-                std::cout << proc.pid << proc.type << (proc.promoted ? "*" : "") << " ";
-            }
-            std::cout << "]";
-            if (isFirstNode && current->next == nullptr)
-                std::cout << " (bottom/top)";
-            else if (isFirstNode)
-                std::cout << " (bottom)";
-            else if (current->next == nullptr)
-                std::cout << " (top)";
-            std::cout << " ";
-            isFirstNode = false;
-            if (current->next == nullptr)
-                isLastNode = true;
+        else if (!bgQueue.empty()) {
+            Process p = bgQueue.front();
+            bgQueue.pop_front();
+            return p;
         }
-        current = current->next;
+        return Process(-1, false);  // Invalid process
     }
-    std::cout << std::endl;
-}
 
-// WaitQueue 클래스
-class WaitQueue {
-private:
-    std::list<Process> waitQueue;
-    std::mutex mtx;
-    std::condition_variable cv;
+    void promote() {
+        lock_guard<mutex> lock(mtx);
+        if (!bgQueue.empty()) {
+            Process p = bgQueue.back();
+            bgQueue.pop_back();
+            p.promoted = true;
+            fgQueue.push_back(p);
+        }
+    }
 
-public:
-    void enqueue(Process p);
-    void update(int elapsedTime);
-    void wakeUpProcesses(DynamicQueue& dq);
-    void printQueue();
+    void printQueue() {
+        lock_guard<mutex> lock(mtx);
+        cout << "DQ: ";
+        cout << "P => ";
+        for (auto& p : bgQueue) {
+            cout << "[" << p.pid << "B" << (p.promoted ? "*" : "") << "] ";
+        }
+        if (!bgQueue.empty() && !fgQueue.empty()) {
+            cout << endl << "P => ";
+        }
+        for (auto& p : fgQueue) {
+            cout << "[" << p.pid << "F" << (p.promoted ? "*" : "") << "] ";
+        }
+        cout << "(bottom/top)" << endl;
+    }
 };
 
-void WaitQueue::enqueue(Process p) {
-    std::lock_guard<std::mutex> lock(mtx);
-    waitQueue.push_back(p);
-    waitQueue.sort([](const Process& a, const Process& b) {
-        return a.wakeUpTime < b.wakeUpTime;
-        });
-    cv.notify_all();
-}
+class AlarmClock {
+    DynamicQueue dq;
+    list<Process> waitQueue;
+    int currentTime;
+    mutex mtx;
+    condition_variable cv;
 
-void WaitQueue::update(int elapsedTime) {
-    std::lock_guard<std::mutex> lock(mtx);
-    for (auto& p : waitQueue) {
-        p.wakeUpTime -= elapsedTime;
+public:
+    AlarmClock() : currentTime(0) {}
+
+    void startShell(int Y) {
+        thread([&, Y]() {
+            while (true) {
+                this_thread::sleep_for(chrono::seconds(Y));
+                unique_lock<mutex> lock(mtx);
+                Process p = dq.dequeue();
+                if (p.pid != -1) {
+                    cout << "Running: [" << p.pid << (p.isForeground ? "F" : "B") << "]" << endl;
+                    // Execute the process
+                    // For simulation, we just print the process id
+                    cout << "Process [" << p.pid << "] executed." << endl;
+                    if (p.isForeground) {
+                        dq.enqueue(p);  // Re-enqueue for continuous execution
+                    }
+                    else {
+                        p.remainingTime = rand() % 10 + 1;  // Random wait time for simulation
+                        waitQueue.push_back(p);  // Move to wait queue for BG processes
+                    }
+                }
+                cv.notify_all();
+            }
+            }).detach();
     }
-}
 
-void WaitQueue::wakeUpProcesses(DynamicQueue& dq) {
-    std::lock_guard<std::mutex> lock(mtx);
-    while (!waitQueue.empty() && waitQueue.front().wakeUpTime <= 0) {
-        Process p = waitQueue.front();
-        waitQueue.pop_front();
+    void startMonitor(int X) {
+        thread([&, X]() {
+            while (true) {
+                this_thread::sleep_for(chrono::seconds(X));
+                unique_lock<mutex> lock(mtx);
+                cout << "---------------------------" << endl;
+                dq.printQueue();
+                cout << "---------------------------" << endl;
+                cout << "WQ: ";
+                for (auto& p : waitQueue) {
+                    cout << "[" << p.pid << (p.isForeground ? "F" : "B") << ":" << p.remainingTime << "] ";
+                }
+                cout << endl;
+                cout << "---------------------------" << endl;
+                cv.notify_all();
+            }
+            }).detach();
+    }
+
+    void promotePeriodically(int interval) {
+        thread([&, interval]() {
+            while (true) {
+                this_thread::sleep_for(chrono::seconds(interval));
+                dq.promote();
+                cv.notify_all();
+            }
+            }).detach();
+    }
+
+    void addProcess(Process p) {
+        unique_lock<mutex> lock(mtx);
         dq.enqueue(p);
+        cv.notify_all();
     }
-}
 
-void WaitQueue::printQueue() {
-    std::lock_guard<std::mutex> lock(mtx);
-    std::cout << "WQ: ";
-    for (const auto& p : waitQueue) {
-        std::cout << "[" << p.pid << p.type << ":" << p.wakeUpTime << "] ";
+    void executeCommand(const string& command) {
+        stringstream ss(command);
+        string cmd;
+        ss >> cmd;
+
+        if (cmd == "echo") {
+            string arg;
+            ss >> arg;
+            cout << arg << endl;
+        }
+        else if (cmd == "dummy") {
+            // Dummy process does nothing
+        }
+        else if (cmd == "gcd") {
+            int x, y;
+            ss >> x >> y;
+            while (y != 0) {
+                int temp = y;
+                y = x % y;
+                x = temp;
+            }
+            cout << "GCD: " << x << endl;
+        }
+        else if (cmd == "prime") {
+            int x;
+            ss >> x;
+            vector<bool> isPrime(x + 1, true);
+            isPrime[0] = isPrime[1] = false;
+            for (int i = 2; i * i <= x; ++i) {
+                if (isPrime[i]) {
+                    for (int j = i * i; j <= x; j += i) {
+                        isPrime[j] = false;
+                    }
+                }
+            }
+            int primeCount = count(isPrime.begin(), isPrime.end(), true);
+            cout << "Primes count: " << primeCount << endl;
+        }
+        else if (cmd == "sum") {
+            int x;
+            ss >> x;
+            int sum = (x * (x + 1)) / 2 % 1000000;
+            cout << "Sum: " << sum << endl;
+        }
     }
-    std::cout << std::endl;
-}
 
-// Foreground Process (Shell)
-void foregroundProcess(DynamicQueue& dq, WaitQueue& wq) {
+    void simulateCommandExecution(const string& commandLine, int& pidCounter) {
+        stringstream ss(commandLine);
+        string cmd;
+
+        while (getline(ss, cmd, ';')) {
+            stringstream cmdStream(cmd);
+            string token;
+            vector<string> tokens;
+            bool isBackground = false;
+
+            while (cmdStream >> token) {
+                if (token[0] == '&') {
+                    isBackground = true;
+                    token = token.substr(1);
+                }
+                tokens.push_back(token);
+            }
+
+            if (!tokens.empty()) {
+                string joinedCommand = tokens[0];
+                for (size_t i = 1; i < tokens.size(); ++i) {
+                    joinedCommand += " " + tokens[i];
+                }
+                cout << "prompt > " << joinedCommand << endl;
+                executeCommand(joinedCommand);
+                addProcess(Process(pidCounter++, !isBackground));
+            }
+        }
+    }
+
+    void readCommandsFromFile(const string& filename, int& pidCounter) {
+        ifstream file(filename);
+        string line;
+        while (getline(file, line)) {
+            simulateCommandExecution(line, pidCounter);
+        }
+    }
+};
+
+void promptLoop(AlarmClock& alarm, int& pidCounter) {
+    string commandLine;
     while (true) {
-        Process p = dq.dequeue();
-        std::cout << "Running: [" << p.pid << p.type << "]" << std::endl;
-        std::cout << "-----------------------------" << std::endl;
-        dq.printQueue();
-        std::cout << "-----------------------------" << std::endl;
-        wq.printQueue();
-        std::cout << "-----------------------------" << std::endl;
-        std::this_thread::sleep_for(std::chrono::seconds(3)); // Simulate command processing time
-        p.wakeUpTime = 5; // For example, 5 seconds to wake up
-        wq.enqueue(p);
+        getline(cin, commandLine);
+        if (commandLine == "exit") break;
+        alarm.simulateCommandExecution(commandLine, pidCounter);
     }
-}
-
-// Background Process (Monitor)
-void backgroundProcess(DynamicQueue& dq, WaitQueue& wq) {
-    while (true) {
-        std::this_thread::sleep_for(std::chrono::seconds(5));
-        std::cout << "Running: [1B]" << std::endl;
-        std::cout << "-----------------------------" << std::endl;
-        dq.printQueue();
-        std::cout << "-----------------------------" << std::endl;
-        wq.printQueue();
-        std::cout << "-----------------------------" << std::endl;
-        dq.promote();
-    }
-}
-
-// Scheduler function
-void scheduler(DynamicQueue& dq, WaitQueue& wq) {
-    while (true) {
-        std::this_thread::sleep_for(std::chrono::seconds(1)); // Simulate 1-second scheduling interval
-        wq.update(1);
-        wq.wakeUpProcesses(dq);
-    }
-}
-
-// Command parsing
-char** parse(const char* command) {
-    std::vector<char*> tokens;
-    char* cmd = _strdup(command);
-    char* token = strtok(cmd, " ");
-    while (token != nullptr) {
-        tokens.push_back(_strdup(token));
-        token = strtok(nullptr, " ");
-    }
-    tokens.push_back(_strdup("")); // End of tokens
-    char** result = new char* [tokens.size()];
-    std::copy(tokens.begin(), tokens.end(), result);
-    free(cmd);
-    return result;
-}
-
-// Execute parsed command
-void exec(char** args) {
-    // For this example, we'll just print the arguments
-    std::cout << "Executing command:";
-    for (int i = 0; args[i][0] != '\0'; ++i) {
-        std::cout << " " << args[i];
-    }
-    std::cout << std::endl;
-
-    // Clean up
-    for (int i = 0; args[i][0] != '\0'; ++i) {
-        free(args[i]);
-    }
-    delete[] args;
 }
 
 int main() {
-    DynamicQueue dq;
-    WaitQueue wq;
+    AlarmClock alarm;
 
-    // 프로세스 생성 및 enqueue
-    Process shell = { 0, 'F', 0, false };
-    Process monitor = { 1, 'B', 0, false };
-    dq.enqueue(shell);
-    dq.enqueue(monitor);
+    // Start background tasks in separate threads
+    thread shellThread(&AlarmClock::startShell, &alarm, 2);
+    thread monitorThread(&AlarmClock::startMonitor, &alarm, 5);
+    thread promoteThread(&AlarmClock::promotePeriodically, &alarm, 10);
 
-    // Create threads for processes
-    std::thread shellThread(foregroundProcess, std::ref(dq), std::ref(wq));
-    std::thread monitorThread(backgroundProcess, std::ref(dq), std::ref(wq));
+    // Adding some initial processes for simulation
+    alarm.addProcess(Process(0, true));
+    alarm.addProcess(Process(1, false));
+    alarm.addProcess(Process(2, true));
+    alarm.addProcess(Process(3, false));
 
-    // Start the scheduler
-    std::thread schedulerThread(scheduler, std::ref(dq), std::ref(wq));
+    int pidCounter = 4;  // Continue PID counter from 4
 
-    // Join the threads
+    // Read commands from file
+    alarm.readCommandsFromFile("commands.txt", pidCounter);
+
+    // Command input loop
+    promptLoop(alarm, pidCounter);
+
+    // Join background threads before exiting
     shellThread.join();
     monitorThread.join();
-    schedulerThread.join();
+    promoteThread.join();
 
     return 0;
 }
