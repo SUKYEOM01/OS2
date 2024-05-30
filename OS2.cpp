@@ -47,7 +47,7 @@ public:
             bgQueue.pop_front();
             return p;
         }
-        return Process(-1, false);  // Invalid process
+        return Process(-1, false);  
     }
 
     void promote() {
