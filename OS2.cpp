@@ -16,7 +16,7 @@ public:
     int pid;
     bool isForeground;
     bool promoted;
-    int remainingTime;  // Time remaining in Wait Queue
+    int remainingTime;  
     Process(int id, bool fg) : pid(id), isForeground(fg), promoted(false), remainingTime(0) {}
 };
 
